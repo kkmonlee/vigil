@@ -1,0 +1,10 @@
+.{
+    .name = "vigil",
+    .version = "0.1.0",
+    .dependencies = .{
+        .@"zig-yaml" = .{
+            .url = "https://github.com/flyx/zig-yaml/archive/refs/tags/v0.2.0.tar.gz",
+            .hash = "12202685c490e5f223f668fc5ec774f26b21ba579b9a67a0a65e7518451f221e5dc4",
+        },
+    },
+}

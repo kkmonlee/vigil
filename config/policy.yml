@@ -1,0 +1,38 @@
+sourceSets:
+  lan: ["192.168.10.0/24"]
+  vlan20: ["192.168.20.0/24"]
+  monitoring: ["192.168.10.120/32"]
+
+services:
+  jellyfin:
+    listeners:
+      - {port: 8096, proto: tcp}
+  radarr:
+    listeners:
+      - {port: 7878, proto: tcp}
+  sonarr:
+    listeners:
+      - {port: 8989, proto: tcp}
+  samba:
+    listeners:
+      - {port: 445, proto: tcp}
+      - {port: 139, proto: tcp}
+      - {port: 137, proto: udp}
+      - {port: 138, proto: udp}
+
+rules:
+  - allow: { sources: ["lan", "vlan20"], service: "jellyfin" }
+  - allow: { sources: ["lan"], service: "radarr" }
+  - allow: { sources: ["lan"], service: "sonarr" }
+  - allow: { sources: ["lan"], service: "samba" }
+
+defaults:
+  inbound: deny
+  outbound: allow
+
+ipv6:
+  enabled: true
+  sourceSets:
+    lan_v6: ["fd00:192:168:10::/64"]
+  rules:
+    - allow: { sources: ["lan_v6"], service: "jellyfin" }
