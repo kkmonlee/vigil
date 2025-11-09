@@ -1,6 +1,6 @@
 # Vigil
 
-A host firewall agent pairing a declarative `nftables` policy engine with a real-time `conntrack` event observer. Vigil prioritises privilege separation, atomic ruleset updates and direct interaction with kernel subsystems.
+Vigil is a firewall agent with a declarative `nftables` policy engine and a real-time `conntrack` event observer. It prioritises privilege separation, atomic ruleset updates and direct interaction with kernel subsystems.
 
 ### Stack
 
