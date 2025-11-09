@@ -13,11 +13,11 @@ A host firewall agent pairing a declarative `nftables` policy engine with a real
 
 ### Some thoughts (might change later)
 
-* Declarative policy: firewall logic is defined in YAML, abstracting CIDR and port groups into reusable sets. The agent's compiler translates this high-level definition into an optimised, low-level `nftables` ruleset.
-* Atomic application: all ruleset changes are applied atomically. The entire ruleset is generated and piped to `nft -f -`, ensuring the firewall is never in an intermittent or broken state during an update.
-* Privilege separation: the core agent runs unprivileged. All operations requiring `CAP_NET_ADMIN` are delegated to a minimal C helper over a UNIX domain socket. The helper's sole responsibility is to execute `nft` and has a severely restricted attack surface.
-* Live observation: new connections are observed in real time by subscribing to the `NFNLGRP_CONNTRACK_NEW` netlink multicast group via `libmnl`. This avoids inefficient polling of `/proc` and captures flow metadata as it is created by the kernel.
-* Persistence: observed flows are aggregated by the minute and recorded in a SQLite database running in Write-Ahead Logging (WAL) mode for non-blocking writes. Not sure if this is a good idea yet.
+* Firewall logic is defined in YAML, abstracting CIDR and port groups into reusable sets. The agent's compiler translates this high-level definition into an optimised, low-level `nftables` ruleset.
+* All ruleset changes are applied atomically. The entire ruleset is generated and piped to `nft -f -`, ensuring the firewall is never in an intermittent or broken state during an update.
+* The core agent runs unprivileged. All operations requiring `CAP_NET_ADMIN` are delegated to a minimal C helper over a UNIX domain socket. The helper's sole responsibility is to execute `nft` and has a severely restricted attack surface.
+* New connections are observed in real time by subscribing to the `NFNLGRP_CONNTRACK_NEW` netlink multicast group via `libmnl`. This avoids inefficient polling of `/proc` and captures flow metadata as it is created by the kernel.
+* Observed flows are aggregated by the minute and recorded in a SQLite database running in Write-Ahead Logging (WAL) mode for non-blocking writes. Not sure if this is a good idea yet.
 
 The agent is split into two processes for privilege separation.
 
