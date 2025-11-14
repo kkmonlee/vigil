@@ -7,7 +7,7 @@
 #include <sys/wait.h>
 #include <errno.h>
 
-#define SOCKET_PATH "/tmp/vigil.sock"
+#define DEFAULT_SOCKET_PATH "/tmp/vigil.sock"
 #define BUF_SIZE 8192
 
 void log_msg(const char *msg) {
@@ -83,6 +83,20 @@ int apply_ruleset(const char *ruleset) {
     }
 }
 
+static const char *resolve_socket_path(char *buffer, size_t buf_size) {
+    const char *env_path = getenv("VIGIL_SOCKET_PATH");
+    const char *chosen = (env_path && env_path[0] != '\0') ? env_path : DEFAULT_SOCKET_PATH;
+
+    if (strlen(chosen) >= buf_size) {
+        log_msg("VIGIL_SOCKET_PATH is too long for unix socket; falling back to default.");
+        chosen = DEFAULT_SOCKET_PATH;
+    }
+
+    strncpy(buffer, chosen, buf_size - 1);
+    buffer[buf_size - 1] = '\0';
+    return buffer;
+}
+
 int main() {
     log_msg("Starting privileged helper.");
 
@@ -102,10 +116,10 @@ int main() {
 
     memset(&server_addr, 0, sizeof(struct sockaddr_un));
     server_addr.sun_family = AF_UNIX;
-    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
+    const char *socket_path = resolve_socket_path(server_addr.sun_path, sizeof(server_addr.sun_path));
 
     // remove old socket if exists
-    unlink(SOCKET_PATH);
+    unlink(socket_path);
 
     if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(struct sockaddr_un)) == -1) {
         log_err("bind failed");
@@ -119,7 +133,7 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    log_msg("Listening on " SOCKET_PATH);
+    fprintf(stderr, "[helper] Listening on %s\n", socket_path);
 
     while (1) {
         if ((client_fd = accept(server_fd, NULL, NULL)) == -1) {
