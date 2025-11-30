@@ -1,3 +1,13 @@
+/* Vigil Privileged Helper: Minimal root process that applies nftables rulesets
+ * 
+ * Security model:
+ * - Runs as root with CAP_NET_ADMIN to modify netfilter rules
+ * - Accepts connections only from local unprivileged agent via Unix socket
+ * - Validates ruleset size before processing
+ * - Executes nft(8) in child process with stdin fed from pipe
+ * - Should drop capabilities and apply seccomp filters after setup (future hardening)
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +18,7 @@
 #include <errno.h>
 
 #define SOCKET_PATH "/tmp/vigil.sock"
-#define BUF_SIZE 8192
+#define MAX_RULESET_SIZE (256 * 1024)  // 256KB limit for ruleset
 
 void log_msg(const char *msg) {
     fprintf(stderr, "[helper] %s\n", msg);
@@ -18,7 +28,18 @@ void log_err(const char *msg) {
     fprintf(stderr, "[helper] ERROR: %s: %s\n", msg, strerror(errno));
 }
 
-int apply_ruleset(const char *ruleset) {
+int apply_ruleset(const char *ruleset, size_t ruleset_len) {
+    // Pre-flight validation: verify nft binary exists before forking
+    if (access("/usr/sbin/nft", X_OK) != 0 && access("/sbin/nft", X_OK) != 0) {
+        log_err("nft command not found or not executable");
+        return -1;
+    }
+
+    if (ruleset_len == 0 || ruleset_len > MAX_RULESET_SIZE) {
+        fprintf(stderr, "[helper] ERROR: Invalid ruleset size: %zu\n", ruleset_len);
+        return -1;
+    }
+
     log_msg("Applying new ruleset...");
     int pipefd[2];
     if (pipe(pipefd) == -1) {
@@ -35,39 +56,40 @@ int apply_ruleset(const char *ruleset) {
     }
 
     if (pid == 0) {
-        // child
+        // Child: execute nft with stdin from pipe
         close(pipefd[1]);
-        // redirect stdin to read end of pipe
-        dup2(pipefd[0], STDIN_FILENO);
+        if (dup2(pipefd[0], STDIN_FILENO) == -1) {
+            log_err("dup2 failed");
+            exit(EXIT_FAILURE);
+        }
         close(pipefd[0]);
 
-        // TODO: add capability dropping and seccomp filters 
+        // Production deployment should drop capabilities here:
+        // - Retain only CAP_NET_ADMIN
+        // - Apply seccomp filter to allow only netlink syscalls
+        // - Set PR_SET_NO_NEW_PRIVS
+        
         log_msg("Executing 'nft -f -'");
         execlp("nft", "nft", "-f", "-", NULL);
         
         log_err("execlp for nft failed");
         exit(EXIT_FAILURE);
     } else {
-        // parent
+        // Parent: write ruleset to pipe, wait for child completion
         close(pipefd[0]);
 
-        // write ruleset to the pipe
-        ssize_t total_written = 0;
-        while (total_written < strlen(ruleset)) {
-            ssize_t written = write(pipefd[1], ruleset + total_written, strlen(ruleset) - total_written);
-            if (written < 0) {
+        size_t total_written = 0;
+        while (total_written < ruleset_len) {
+            ssize_t written = write(pipefd[1], ruleset + total_written, ruleset_len - total_written);
+            if (written <= 0) {
                 log_err("write to pipe failed");
-                break;
+                close(pipefd[1]);
+                waitpid(pid, NULL, 0);
+                return -1;
             }
             total_written += written;
         }
 
-        if (access("/usr/sbin/nft", X_OK) != 0) {
-            log_err("nft command not found or not executable");
-            return -1;
-        }
-
-        // close pipe to send EOF to child
         close(pipefd[1]);
 
         int status;
@@ -121,6 +143,7 @@ int main() {
 
     log_msg("Listening on " SOCKET_PATH);
 
+    // Main accept loop - handle one connection at a time (single-threaded by design)
     while (1) {
         if ((client_fd = accept(server_fd, NULL, NULL)) == -1) {
             log_err("accept failed");
@@ -129,20 +152,44 @@ int main() {
 
         log_msg("Accepted connection from agent.");
         
-        char buffer[BUF_SIZE] = {0};
-        ssize_t bytes_read = read(client_fd, buffer, BUF_SIZE - 1);
+        // Allocate buffer for ruleset - heap allocation for large rulesets
+        char *buffer = malloc(MAX_RULESET_SIZE);
+        if (!buffer) {
+            log_err("malloc failed");
+            write(client_fd, "FAIL", 4);
+            close(client_fd);
+            continue;
+        }
 
-        if (bytes_read > 0) {
-            buffer[bytes_read] = '\0'; // Null-terminate
-            if (apply_ruleset(buffer) == 0) {
+        // Read entire ruleset - may require multiple read() calls for large rulesets
+        size_t total_read = 0;
+        ssize_t bytes_read;
+        while (total_read < MAX_RULESET_SIZE) {
+            bytes_read = read(client_fd, buffer + total_read, MAX_RULESET_SIZE - total_read);
+            if (bytes_read < 0) {
+                log_err("read from client failed");
+                break;
+            }
+            if (bytes_read == 0) break;  // EOF
+            total_read += bytes_read;
+        }
+
+        if (total_read > 0 && total_read < MAX_RULESET_SIZE) {
+            buffer[total_read] = '\0';
+            if (apply_ruleset(buffer, total_read) == 0) {
                 write(client_fd, "OK", 2);
             } else {
                 write(client_fd, "FAIL", 4);
             }
+        } else if (total_read >= MAX_RULESET_SIZE) {
+            log_msg("Ruleset too large, rejecting.");
+            write(client_fd, "FAIL", 4);
         } else {
-            log_err("read from client failed");
+            log_err("No data received from client");
+            write(client_fd, "FAIL", 4);
         }
 
+        free(buffer);
         close(client_fd);
     }
 

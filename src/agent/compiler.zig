@@ -1,8 +1,10 @@
+// NFTables ruleset compiler: Transforms declarative policy into nftables syntax
+// Generates table with named sets for sources/services and chains for input/output filtering
 const std = @import("std");
 const policy = @import("policy.zig");
 
 pub fn compile(p: policy.Policy, alloc: std.mem.Allocator) ![]const u8 {
-    var buffer: std.ArrayList(u8) = .empty;
+    var buffer: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
     defer buffer.deinit(alloc);
 
     if (p.sourceSets.count() == 0) {
@@ -13,8 +15,9 @@ pub fn compile(p: policy.Policy, alloc: std.mem.Allocator) ![]const u8 {
         return error.InvalidPolicy;
     }
 
+    // IPv6 validation: if enabled, must have both sourceSets and rules defined
     if (p.ipv6) |ipv6_policy| {
-        if (ipv6_policy.sourceSets == null or ipv6_policy.rules == null) {
+        if (ipv6_policy.enabled and (ipv6_policy.sourceSets == null or ipv6_policy.rules == null)) {
             return error.InvalidPolicy;
         }
     }

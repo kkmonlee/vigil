@@ -1,3 +1,6 @@
+// Policy parser: Custom YAML subset parser for firewall rule definitions
+// Supports IPv4/IPv6 source sets, service definitions with listeners, allow rules, and default policies
+// Avoids external dependencies for security-critical configuration parsing
 const std = @import("std");
 
 pub const Listener = struct {
@@ -34,6 +37,9 @@ pub const Policy = struct {
     },
     ipv6: ?Ipv6Policy = null,
 
+    // Memory ownership: Policy struct owns all allocated data
+    // Caller must free: sourceSets (deinit), services (deinit), rules slice, 
+    // defaults.inbound/outbound strings, ipv6.sourceSets (if set), ipv6.rules (if set)
     pub fn loadFromFile(alloc: std.mem.Allocator, path: []const u8) !Policy {
         const content = try std.fs.cwd().readFileAlloc(alloc, path, 1 * 1024 * 1024);
         defer alloc.free(content);
@@ -51,8 +57,12 @@ pub const Policy = struct {
         var rules: std.ArrayList(Rule) = .{ .items = &.{}, .capacity = 0 };
         errdefer rules.deinit(alloc);
 
-        var defaults_inbound: []const u8 = "deny";
-        var defaults_outbound: []const u8 = "allow";
+        // Default policy actions - always allocate to maintain consistent ownership
+        var defaults_inbound: []const u8 = try alloc.dupe(u8, "deny");
+        errdefer alloc.free(defaults_inbound);
+        var defaults_outbound: []const u8 = try alloc.dupe(u8, "allow");
+        errdefer alloc.free(defaults_outbound);
+        
         var ipv6: ?Ipv6Policy = null;
 
         var lines = std.mem.splitScalar(u8, content, '\n');
@@ -207,11 +217,13 @@ pub const Policy = struct {
                     if (std.mem.indexOf(u8, trimmed, "inbound:")) |_| {
                         if (std.mem.indexOf(u8, trimmed, ":")) |colon_idx| {
                             const value = std.mem.trim(u8, trimmed[colon_idx + 1 ..], " \t");
+                            alloc.free(defaults_inbound);
                             defaults_inbound = try alloc.dupe(u8, value);
                         }
                     } else if (std.mem.indexOf(u8, trimmed, "outbound:")) |_| {
                         if (std.mem.indexOf(u8, trimmed, ":")) |colon_idx| {
                             const value = std.mem.trim(u8, trimmed[colon_idx + 1 ..], " \t");
+                            alloc.free(defaults_outbound);
                             defaults_outbound = try alloc.dupe(u8, value);
                         }
                     }

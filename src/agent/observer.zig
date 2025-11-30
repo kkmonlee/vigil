@@ -1,3 +1,7 @@
+// Conntrack observer: Linux netfilter connection tracking monitor via libmnl
+// Subscribes to NETLINK_NETFILTER for new connection events (CT_NEW)
+// Extracts flow 5-tuple and records to datastore for audit trail
+// Platform-conditional: Linux only (uses kernel netlink interface)
 const std = @import("std");
 const datastore = @import("datastore.zig");
 const builtin = @import("builtin");
@@ -33,6 +37,13 @@ pub fn start(ds: *datastore.Datastore) !std.Thread {
 
 fn listenLoop(ctx: *ThreadContext) void {
     if (builtin.os.tag != .linux) return;
+    
+    defer {
+        ctx.ds.allocator.destroy(ctx.should_stop);
+        ctx.ds.allocator.destroy(ctx);
+    }
+    
+    // Open netlink socket for netfilter subsystem communication
     const nl = c.mnl_socket_open(c.NETLINK_NETFILTER);
     if (nl == null) {
         std.log.err("Failed to open netlink socket", .{});
@@ -40,16 +51,20 @@ fn listenLoop(ctx: *ThreadContext) void {
     }
     defer c.mnl_socket_close(nl);
 
+    // Bind with auto port assignment - kernel assigns unique PID
     if (c.mnl_socket_bind(nl, 0, c.MNL_SOCKET_AUTOPID) < 0) {
         std.log.err("Failed to bind netlink socket", .{});
         return;
     }
 
+    // Subscribe to conntrack NEW events multicast group for connection tracking
+    // Only captures new connections, not established state changes
     if (c.mnl_socket_setsockopt(nl, c.NETLINK_ADD_MEMBERSHIP, &c.NF_NETLINK_CONNTRACK_NEW, @sizeOf(@TypeOf(c.NF_NETLINK_CONNTRACK_NEW))) < 0) {
         std.log.err("Failed to join conntrack multicast group", .{});
         return;
     }
 
+    // Buffer for netlink messages - aligned for nlmsghdr structure access
     var buf: [8192]u8 align(@alignOf(c.nlmsghdr)) = undefined;
 
     std.log.info("Observer started, listening for conntrack events", .{});
@@ -70,11 +85,15 @@ fn listenLoop(ctx: *ThreadContext) void {
     std.log.info("Observer stopped", .{});
 }
 
+// Netlink message callback: Parses conntrack event and extracts flow 5-tuple
+// Netlink attributes are nested: CTA_TUPLE_ORIG -> {CTA_TUPLE_IP, CTA_TUPLE_PROTO}
+// IP tuple contains src/dst addresses, proto tuple contains protocol and ports
 fn dataCallback(nlh: ?*const c.nlmsghdr, data: ?*anyopaque) callconv(.c) c_int {
     const ctx = @as(*ThreadContext, @ptrCast(@alignCast(data)));
 
     const nfg = @as(*c.nfgenmsg, @ptrCast(@alignCast(c.mnl_nlmsg_get_payload(nlh))));
 
+    // Parse top-level attributes into table
     var tb: [c.CTA_MAX + 1]?*c.nlattr = undefined;
     @memset(&tb, null);
 
