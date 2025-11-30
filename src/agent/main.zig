@@ -96,7 +96,7 @@ pub fn main() !void {
     }
 
     std.log.info("Shutdown signal received. Cleaning up...", .{});
-    
+
     // Observer thread will terminate when process exits (daemon thread)
     // For production, implement graceful observer shutdown via context.should_stop
     observer_thread.detach();

@@ -37,12 +37,12 @@ pub fn start(ds: *datastore.Datastore) !std.Thread {
 
 fn listenLoop(ctx: *ThreadContext) void {
     if (builtin.os.tag != .linux) return;
-    
+
     defer {
         ctx.ds.allocator.destroy(ctx.should_stop);
         ctx.ds.allocator.destroy(ctx);
     }
-    
+
     // Open netlink socket for netfilter subsystem communication
     const nl = c.mnl_socket_open(c.NETLINK_NETFILTER);
     if (nl == null) {

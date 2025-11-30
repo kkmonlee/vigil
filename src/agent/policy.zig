@@ -38,7 +38,7 @@ pub const Policy = struct {
     ipv6: ?Ipv6Policy = null,
 
     // Memory ownership: Policy struct owns all allocated data
-    // Caller must free: sourceSets (deinit), services (deinit), rules slice, 
+    // Caller must free: sourceSets (deinit), services (deinit), rules slice,
     // defaults.inbound/outbound strings, ipv6.sourceSets (if set), ipv6.rules (if set)
     pub fn loadFromFile(alloc: std.mem.Allocator, path: []const u8) !Policy {
         const content = try std.fs.cwd().readFileAlloc(alloc, path, 1 * 1024 * 1024);
@@ -62,7 +62,7 @@ pub const Policy = struct {
         errdefer alloc.free(defaults_inbound);
         var defaults_outbound: []const u8 = try alloc.dupe(u8, "allow");
         errdefer alloc.free(defaults_outbound);
-        
+
         var ipv6: ?Ipv6Policy = null;
 
         var lines = std.mem.splitScalar(u8, content, '\n');
