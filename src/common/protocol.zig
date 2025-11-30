@@ -1,3 +1,3 @@
 const std = @import("std");
 
-pub const SOCKET_PATH = std.os.getenv("VIGIL_SOCKET_PATH") orelse "/tmp/vigil.sock";
+pub const SOCKET_PATH = "/tmp/vigil.sock";

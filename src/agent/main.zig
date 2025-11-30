@@ -8,7 +8,7 @@ const observer = @import("observer.zig");
 const alloc = std.heap.page_allocator;
 
 fn applyLatestPolicy() !void {
-    const p = try policy.Policy.loadFromFile(alloc, "config/policy.yml");
+    var p = try policy.Policy.loadFromFile(alloc, "config/policy.yml");
     defer p.sourceSets.deinit();
     defer p.services.deinit();
     std.log.info("Policy loaded successfully.", .{});
@@ -19,11 +19,11 @@ fn applyLatestPolicy() !void {
     std.log.debug("Compiled nftables script:\n---\n{s}\n---", .{nft_script});
 
     const sock_addr = try std.net.Address.initUnix(protocol.SOCKET_PATH);
-    var stream = try std.net.connectStream(sock_addr, .{});
+    const stream = try std.net.connectUnixSocket(&sock_addr.un.path);
     defer stream.close();
 
     std.log.info("Connected to helper, sending {d} bytes of rules.", .{nft_script.len});
-    try stream.writer().writeAll(nft_script);
+    _ = try stream.writeAll(nft_script);
 
     var response_buf: [4]u8 = undefined;
     const n = try stream.read(&response_buf);
@@ -52,17 +52,27 @@ pub fn main() !void {
     var ds = try datastore.Datastore.init(alloc);
     defer ds.deinit();
 
-    const observer_thread = try observer.start(&ds);
+    const observer_thread = observer.start(&ds) catch |err| {
+        std.log.warn("Observer failed to start: {s}", .{@errorName(err)});
+        return err;
+    };
 
     std.log.info("Agent is running. Press Ctrl-C to stop.", .{});
 
     // use a semaphore to wait for a SIGINT or SIGTERM
     var stop_flag: u8 = 0;
-    std.os.setPosixSignalHandler(.INT, sigHandler, &stop_flag);
-    std.os.setPosixSignalHandler(.TERM, sigHandler, &stop_flag);
+    global_stop_flag = &stop_flag;
 
-    while (@atomicLoad(u8, &stop_flag, .Acquire) == 0) {
-        std.time.sleep(1 * std.time.ns_per_s);
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = @ptrCast(&sigHandlerWrapper) },
+        .mask = std.mem.zeroes(std.posix.sigset_t),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+
+    while (@atomicLoad(u8, &stop_flag, .acquire) == 0) {
+        std.Thread.sleep(1 * std.time.ns_per_s);
     }
 
     // the observer thread should and will exit when the main process dies
@@ -71,11 +81,20 @@ pub fn main() !void {
     _ = observer_thread;
 }
 
-fn sigHandler(context: ?*anyopaque, signum: u8, siginfo: *const std.os.siginfo_t) void {
+var global_stop_flag: ?*u8 = null;
+
+fn sigHandlerWrapper(sig: c_int) callconv(.c) void {
+    _ = sig;
+    if (global_stop_flag) |flag| {
+        @atomicStore(u8, flag, 1, .release);
+    }
+}
+
+fn sigHandler(context: ?*anyopaque, signum: u8, siginfo: *const std.posix.siginfo_t) void {
     _ = signum;
     _ = siginfo;
     if (context) |ctx| {
         const flag = @as(*u8, @ptrCast(@alignCast(ctx)));
-        @atomicStore(u8, flag, 1, .Release);
+        @atomicStore(u8, flag, 1, .release);
     }
 }

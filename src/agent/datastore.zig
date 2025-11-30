@@ -1,5 +1,7 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
+const c = @cImport({
+    @cInclude("sqlite3.h");
+});
 
 const DB_PATH = "/var/lib/vigil/flows.db";
 const DB_DIR = "/var/lib/vigil";
@@ -8,83 +10,95 @@ pub const FlowRecord = struct {
     ts_minute: u64,
     family: u4,
     proto: u8,
-    src_addr: std.net.IpAddress,
-    dst_addr: std.net.IpAddress,
+    src_addr: std.net.Address,
+    dst_addr: std.net.Address,
     dst_port: u16,
 };
 
 pub const Datastore = struct {
-    db: sqlite.Db,
     allocator: std.mem.Allocator,
+    db: *c.sqlite3,
 
     pub fn init(alloc: std.mem.Allocator) !Datastore {
-        try std.fs.getWin32IniPath() catch |err| switch (err) {
-            error.UnsupportedOperatingSystem => try std.fs.cwd().makeDirAll(DB_DIR),
-            else => |e| return e,
+        std.fs.cwd().makePath(DB_DIR) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
         };
 
-        var db = try sqlite.Db.init(.{
-            .filename = DB_PATH,
-            .mode = .{ .write = true, .create = true },
-            .allocator = alloc,
-        });
+        var db: ?*c.sqlite3 = null;
+        const db_path_z = DB_PATH ++ "";
+        const rc = c.sqlite3_open(db_path_z.ptr, &db);
+        if (rc != c.SQLITE_OK) {
+            std.log.err("Failed to open database: {s}", .{c.sqlite3_errmsg(db)});
+            return error.DatabaseOpenFailed;
+        }
 
-        try db.exec("PRAGMA journal_mode=WAL;", .{});
+        const create_table_sql =
+            \\CREATE TABLE IF NOT EXISTS flows (
+            \\  ts_minute INTEGER NOT NULL,
+            \\  family INTEGER NOT NULL,
+            \\  proto INTEGER NOT NULL,
+            \\  src_addr TEXT NOT NULL,
+            \\  dst_addr TEXT NOT NULL,
+            \\  dst_port INTEGER NOT NULL,
+            \\  PRIMARY KEY (ts_minute, family, proto, src_addr, dst_addr, dst_port)
+            \\)
+        ;
+
+        var errmsg: [*c]u8 = null;
+        const create_rc = c.sqlite3_exec(db, create_table_sql.ptr, null, null, &errmsg);
+        if (create_rc != c.SQLITE_OK) {
+            std.log.err("Failed to create table: {s}", .{errmsg});
+            c.sqlite3_free(errmsg);
+            _ = c.sqlite3_close(db);
+            return error.DatabaseInitFailed;
+        }
+
         std.log.info("Opened datastore at {s}", .{DB_PATH});
-
-        try db.exec(
-            \\ CREATE TABLE IF NOT EXISTS flows_minute (
-            \\   ts_minute INTEGER,
-            \\   family INTEGER,
-            \\   proto INTEGER,
-            \\   src_cidr TEXT,
-            \\   dst_ip TEXT,
-            \\   dst_port INTEGER,
-            \\   count INTEGER NOT NULL DEFAULT 0,
-            \\   bytes INTEGER NOT NULL DEFAULT 0,
-            \\   PRIMARY KEY (ts_minute, family, proto, src_cidr, dst_ip, dst_port)
-            \\ );
-        , .{});
         std.log.debug("Datastore schema initialized.", .{});
 
-        return Datastore{ .db = db, .allocator = alloc };
+        return Datastore{
+            .allocator = alloc,
+            .db = db.?,
+        };
     }
 
     pub fn deinit(self: *Datastore) void {
-        self.db.deinit() catch |err| {
-            std.log.err("Failed to deinitialize database: {s}", .{@errorName(err)});
-        };
+        _ = c.sqlite3_close(self.db);
     }
 
-    /// records a flow, aggregating counts for the same 6-tuple within the same minute
     pub fn recordFlow(self: *Datastore, flow: FlowRecord) !void {
-        var upsert_stmt = try self.db.prepare(
-            \\ INSERT INTO flows_minute (ts_minute, family, proto, src_cidr, dst_ip, dst_port, count, bytes)
-            \\ VALUES (?, ?, ?, ?, ?, ?, 1, 0)
-            \\ ON CONFLICT(ts_minute, family, proto, src_cidr, dst_ip, dst_port) DO UPDATE SET
-            \\   count = count + 1;
-        );
-        defer upsert_stmt.deinit();
+        const insert_sql =
+            \\INSERT OR IGNORE INTO flows 
+            \\(ts_minute, family, proto, src_addr, dst_addr, dst_port)
+            \\VALUES (?, ?, ?, ?, ?, ?)
+        ;
 
-        const src_cidr = try flow.src_addr.any.fmtCIDR(self.allocator) catch |err| {
-            std.log.err("Failed to format source CIDR: {s}", .{@errorName(err)});
-            return err;
-        };
-        defer self.allocator.free(src_cidr);
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, insert_sql.ptr, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) {
+            std.log.err("Failed to prepare statement: {s}", .{c.sqlite3_errmsg(self.db)});
+            return error.DatabasePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
 
-        const dst_ip_str = try flow.dst_addr.any.fmt(self.allocator) catch |err| {
-            std.log.err("Failed to format destination IP: {s}", .{@errorName(err)});
-            return err;
-        };
-        defer self.allocator.free(dst_ip_str);
+        _ = c.sqlite3_bind_int64(stmt, 1, @intCast(flow.ts_minute));
+        _ = c.sqlite3_bind_int(stmt, 2, flow.family);
+        _ = c.sqlite3_bind_int(stmt, 3, flow.proto);
 
-        try upsert_stmt.exec(.{
-            flow.ts_minute,
-            flow.family,
-            flow.proto,
-            src_cidr,
-            dst_ip_str,
-            flow.dst_port,
-        });
+        var src_buf: [128]u8 = undefined;
+        var dst_buf: [128]u8 = undefined;
+        const src_str = try std.fmt.bufPrint(&src_buf, "{}", .{flow.src_addr});
+        const dst_str = try std.fmt.bufPrint(&dst_buf, "{}", .{flow.dst_addr});
+
+        _ = c.sqlite3_bind_text(stmt, 4, src_str.ptr, @intCast(src_str.len), c.SQLITE_TRANSIENT);
+        _ = c.sqlite3_bind_text(stmt, 5, dst_str.ptr, @intCast(dst_str.len), c.SQLITE_TRANSIENT);
+        _ = c.sqlite3_bind_int(stmt, 6, flow.dst_port);
+
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) {
+            std.log.err("Failed to insert flow record: {s}", .{c.sqlite3_errmsg(self.db)});
+            return error.DatabaseInsertFailed;
+        }
     }
 };

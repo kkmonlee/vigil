@@ -1,33 +1,40 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    b.minimumVersion("0.11.0");
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const helper_exe = b.addExecutable(.{
         .name = "helper",
-        .root_source_file = .{ .path = "src/helper/helper.c" },
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
     });
-
-    helper_exe.linkSystemLibrary("c");
+    helper_exe.addCSourceFile(.{
+        .file = b.path("src/helper/helper.c"),
+        .flags = &.{},
+    });
+    helper_exe.linkLibC();
     b.installArtifact(helper_exe);
 
     const agent_exe = b.addExecutable(.{
         .name = "agent",
-        .root_source_file = .{ .path = "src/agent/main.zig" },
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agent/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
+    agent_exe.root_module.addAnonymousImport("common/protocol.zig", .{
+        .root_source_file = b.path("src/common/protocol.zig"),
+    });
+    agent_exe.linkLibC();
+    agent_exe.linkSystemLibrary("sqlite3");
 
-    const yaml_dep = b.dependency("zig-yaml", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    agent_exe.addModule("yaml", yaml_dep.module("yaml"));
+    if (target.result.os.tag == .linux) {
+        agent_exe.linkSystemLibrary("mnl");
+    }
 
     b.installArtifact(agent_exe);
 

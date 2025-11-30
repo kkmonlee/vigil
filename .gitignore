@@ -3,3 +3,5 @@ zig-cache/
 *.tmp
 *.log
 *.nft
+.zig-cache/
+.vscode/
