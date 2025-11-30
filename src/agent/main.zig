@@ -10,9 +10,9 @@ const observer = @import("observer.zig");
 
 const alloc = std.heap.page_allocator;
 
-// Loads policy from disk, compiles to nftables ruleset, and applies via privileged helper
-fn applyLatestPolicy() !void {
-    var p = try policy.Policy.loadFromFile(alloc, "config/policy.yml");
+// Compiles policy file to nftables script
+fn compilePolicyToNft(policy_path: []const u8) ![]const u8 {
+    var p = try policy.Policy.loadFromFile(alloc, policy_path);
     defer {
         p.sourceSets.deinit();
         p.services.deinit();
@@ -24,9 +24,13 @@ fn applyLatestPolicy() !void {
             if (ipv6.rules) |rules| alloc.free(rules);
         }
     }
+    return try compiler.compile(p, alloc);
+}
+
+// Loads policy from disk, compiles to nftables ruleset, and applies via privileged helper
+fn applyLatestPolicy(policy_path: []const u8) !void {
     std.log.info("Policy loaded successfully.", .{});
 
-fn applyLatestPolicy(policy_path: []const u8) !void {
     const nft_script = try compilePolicyToNft(policy_path);
     defer alloc.free(nft_script);
 
@@ -67,7 +71,7 @@ fn runDryRun(policy_path: []const u8) !void {
 
     std.debug.print("Compiled nftables script:\n---\n{s}\n---\n", .{nft_script});
 
-    var child = std.ChildProcess.init(&[_][]const u8{ "nft", "-c", "-f", "-" }, alloc);
+    var child = std.process.Child.init(&[_][]const u8{ "nft", "-c", "-f", "-" }, alloc);
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
@@ -75,7 +79,7 @@ fn runDryRun(policy_path: []const u8) !void {
     try child.spawn();
 
     if (child.stdin) |stdin| {
-        try stdin.writer().writeAll(nft_script);
+        _ = try stdin.writeAll(nft_script);
         stdin.close();
     }
 
@@ -139,9 +143,12 @@ pub fn main() !void {
     defer ds.deinit();
 
     // Start observer thread for netfilter conntrack monitoring (Linux only)
-    const observer_thread = observer.start(&ds) catch |err| {
+    const observer_thread = if (observer_enabled) observer.start(&ds) catch |err| {
         std.log.warn("Observer failed to start: {s}", .{@errorName(err)});
         return err;
+    } else blk: {
+        std.log.info("Observer disabled by --no-observer flag", .{});
+        break :blk null;
     };
 
     std.log.info("Agent is running. Press Ctrl-C to stop.", .{});
@@ -167,7 +174,9 @@ pub fn main() !void {
 
     // Observer thread will terminate when process exits (daemon thread)
     // For production, implement graceful observer shutdown via context.should_stop
-    observer_thread.detach();
+    if (observer_thread) |thread| {
+        thread.detach();
+    }
 }
 
 // Global pointer for signal handler to access stop flag (signal-safe pattern)
