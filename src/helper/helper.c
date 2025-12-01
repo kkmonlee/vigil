@@ -19,7 +19,7 @@
 
 #define SOCKET_PATH "/tmp/vigil.sock"
 #define DEFAULT_SOCKET_PATH "/tmp/vigil.sock"
-#define MAX_RULESET_SIZE (256 * 1024)  // 256KB limit for ruleset
+#define MAX_RULESET_SIZE (256 * 1024)
 
 void log_msg(const char *msg) {
     fprintf(stderr, "[helper] %s\n", msg);

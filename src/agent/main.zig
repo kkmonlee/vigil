@@ -7,6 +7,8 @@ const compiler = @import("compiler.zig");
 const datastore = @import("datastore.zig");
 const observer = @import("observer.zig");
 
+const VERSION = "0.1.0";
+
 fn compilePolicyToNft(alloc: std.mem.Allocator, policy_path: []const u8) ![]const u8 {
     var pol = try policy.Policy.loadFromFile(alloc, policy_path);
     defer {
@@ -32,7 +34,10 @@ fn applyLatestPolicy(alloc: std.mem.Allocator, policy_path: []const u8) !void {
     defer alloc.free(script);
 
     const socket_path = "/tmp/vigil.sock";
-    const stream = try std.net.connectUnixSocket(socket_path);
+    const stream = std.net.connectUnixSocket(socket_path) catch |err| {
+        std.log.err("Failed to connect to helper at {s}: {}", .{ socket_path, err });
+        return err;
+    };
     defer stream.close();
 
     const len: u32 = @intCast(script.len);
