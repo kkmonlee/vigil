@@ -30,7 +30,6 @@ void log_err(const char *msg) {
 }
 
 int apply_ruleset(const char *ruleset, size_t ruleset_len) {
-    // Pre-flight validation: verify nft binary exists before forking
     if (access("/usr/sbin/nft", X_OK) != 0 && access("/sbin/nft", X_OK) != 0) {
         log_err("nft command not found or not executable");
         return -1;
@@ -57,7 +56,6 @@ int apply_ruleset(const char *ruleset, size_t ruleset_len) {
     }
 
     if (pid == 0) {
-        // Child: execute nft with stdin from pipe
         close(pipefd[1]);
         if (dup2(pipefd[0], STDIN_FILENO) == -1) {
             log_err("dup2 failed");
@@ -65,18 +63,12 @@ int apply_ruleset(const char *ruleset, size_t ruleset_len) {
         }
         close(pipefd[0]);
 
-        // Production deployment should drop capabilities here:
-        // - Retain only CAP_NET_ADMIN
-        // - Apply seccomp filter to allow only netlink syscalls
-        // - Set PR_SET_NO_NEW_PRIVS
-        
         log_msg("Executing 'nft -f -'");
         execlp("nft", "nft", "-f", "-", NULL);
         
         log_err("execlp for nft failed");
         exit(EXIT_FAILURE);
     } else {
-        // Parent: write ruleset to pipe, wait for child completion
         close(pipefd[0]);
 
         size_t total_written = 0;
@@ -123,7 +115,6 @@ static const char *resolve_socket_path(char *buffer, size_t buf_size) {
 int main() {
     log_msg("Starting privileged helper.");
 
-    // check if running as root
     if (geteuid() != 0) {
         fprintf(stderr, "[helper] ERROR: This helper must be run as root.\n");
         return EXIT_FAILURE;
@@ -141,7 +132,6 @@ int main() {
     server_addr.sun_family = AF_UNIX;
     const char *socket_path = resolve_socket_path(server_addr.sun_path, sizeof(server_addr.sun_path));
 
-    // remove old socket if exists
     unlink(socket_path);
 
     if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(struct sockaddr_un)) == -1) {
@@ -158,7 +148,6 @@ int main() {
 
     fprintf(stderr, "[helper] Listening on %s\n", socket_path);
 
-    // Main accept loop - handle one connection at a time (single-threaded by design)
     while (1) {
         if ((client_fd = accept(server_fd, NULL, NULL)) == -1) {
             log_err("accept failed");
@@ -166,32 +155,30 @@ int main() {
         }
 
         log_msg("Accepted connection from agent.");
-        
-        // Allocate buffer for ruleset - heap allocation for large rulesets
-        char *buffer = malloc(MAX_RULESET_SIZE);
-        if (!buffer) {
+
+        char *ruleset = malloc(MAX_RULESET_SIZE);
+        if (!ruleset) {
             log_err("malloc failed");
             write(client_fd, "FAIL", 4);
             close(client_fd);
             continue;
         }
 
-        // Read entire ruleset - may require multiple read() calls for large rulesets
         size_t total_read = 0;
         ssize_t bytes_read;
         while (total_read < MAX_RULESET_SIZE) {
-            bytes_read = read(client_fd, buffer + total_read, MAX_RULESET_SIZE - total_read);
+            bytes_read = read(client_fd, ruleset + total_read, MAX_RULESET_SIZE - total_read);
             if (bytes_read < 0) {
-                log_err("read from client failed");
+                log_err("read failed");
                 break;
             }
-            if (bytes_read == 0) break;  // EOF
+            if (bytes_read == 0) break;
             total_read += bytes_read;
         }
 
         if (total_read > 0 && total_read < MAX_RULESET_SIZE) {
-            buffer[total_read] = '\0';
-            if (apply_ruleset(buffer, total_read) == 0) {
+            ruleset[total_read] = '\0';
+            if (apply_ruleset(ruleset, total_read) == 0) {
                 write(client_fd, "OK", 2);
             } else {
                 write(client_fd, "FAIL", 4);
@@ -204,7 +191,7 @@ int main() {
             write(client_fd, "FAIL", 4);
         }
 
-        free(buffer);
+        free(ruleset);
         close(client_fd);
     }
 

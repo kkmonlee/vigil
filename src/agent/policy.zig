@@ -37,9 +37,6 @@ pub const Policy = struct {
     },
     ipv6: ?Ipv6Policy = null,
 
-    // Memory ownership: Policy struct owns all allocated data
-    // Caller must free: sourceSets (deinit), services (deinit), rules slice,
-    // defaults.inbound/outbound strings, ipv6.sourceSets (if set), ipv6.rules (if set)
     pub fn loadFromFile(alloc: std.mem.Allocator, path: []const u8) !Policy {
         const content = try std.fs.cwd().readFileAlloc(alloc, path, 1 * 1024 * 1024);
         defer alloc.free(content);
@@ -57,7 +54,6 @@ pub const Policy = struct {
         var rules: std.ArrayList(Rule) = .{ .items = &.{}, .capacity = 0 };
         errdefer rules.deinit(alloc);
 
-        // Default policy actions - always allocate to maintain consistent ownership
         var defaults_inbound: []const u8 = try alloc.dupe(u8, "deny");
         errdefer alloc.free(defaults_inbound);
         var defaults_outbound: []const u8 = try alloc.dupe(u8, "allow");

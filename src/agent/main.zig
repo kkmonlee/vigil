@@ -2,74 +2,61 @@
 // Architecture: Agent parses YAML policies, compiles to nftables syntax, sends to helper via Unix socket,
 // and monitors network flows via netfilter conntrack for audit logging.
 const std = @import("std");
-const protocol = @import("common/protocol.zig");
 const policy = @import("policy.zig");
 const compiler = @import("compiler.zig");
 const datastore = @import("datastore.zig");
 const observer = @import("observer.zig");
 
-const alloc = std.heap.page_allocator;
-
-// Compiles policy file to nftables script
-fn compilePolicyToNft(policy_path: []const u8) ![]const u8 {
-    var p = try policy.Policy.loadFromFile(alloc, policy_path);
+fn compilePolicyToNft(alloc: std.mem.Allocator, policy_path: []const u8) ![]const u8 {
+    var pol = try policy.Policy.loadFromFile(alloc, policy_path);
     defer {
-        p.sourceSets.deinit();
-        p.services.deinit();
-        alloc.free(p.rules);
-        alloc.free(p.defaults.inbound);
-        alloc.free(p.defaults.outbound);
-        if (p.ipv6) |*ipv6| {
+        pol.sourceSets.deinit();
+        pol.services.deinit();
+        alloc.free(pol.rules);
+        alloc.free(pol.defaults.inbound);
+        alloc.free(pol.defaults.outbound);
+        if (pol.ipv6) |*ipv6| {
             if (ipv6.sourceSets) |*sets| sets.deinit();
             if (ipv6.rules) |rules| alloc.free(rules);
         }
     }
-    return try compiler.compile(p, alloc);
+
+    const script = try compiler.compile(pol, alloc);
+    defer alloc.free(script);
+
+    return script;
 }
 
-// Loads policy from disk, compiles to nftables ruleset, and applies via privileged helper
-fn applyLatestPolicy(policy_path: []const u8) !void {
-    std.log.info("Policy loaded successfully.", .{});
+fn applyLatestPolicy(alloc: std.mem.Allocator, policy_path: []const u8) !void {
+    const script = try compilePolicyToNft(alloc, policy_path);
+    defer alloc.free(script);
 
-    const nft_script = try compilePolicyToNft(policy_path);
-    defer alloc.free(nft_script);
-
-    std.log.debug("Compiled nftables script:\n---\n{s}\n---", .{nft_script});
-
-    const sock_addr = try std.net.Address.initUnix(protocol.SOCKET_PATH);
-    const stream = try std.net.connectUnixSocket(&sock_addr.un.path);
+    const socket_path = "/tmp/vigil.sock";
+    const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
 
-    std.log.info("Connected to helper, sending {d} bytes of rules.", .{nft_script.len});
-    _ = try stream.writeAll(nft_script);
+    const len: u32 = @intCast(script.len);
+    try stream.writeAll(std.mem.asBytes(&len));
+    try stream.writeAll(script);
 
-    var response_buf: [8]u8 = undefined;
-    const n = try stream.read(&response_buf);
-
+    var resp: [8]u8 = undefined;
+    const n = try stream.read(&resp);
     if (n == 0) {
-        std.log.err("Helper closed connection without response", .{});
         return error.HelperNoResponse;
     }
 
-    if (!std.mem.eql(u8, response_buf[0..n], "OK") and !std.mem.eql(u8, response_buf[0..n], "FAIL")) {
-        std.log.err("Unexpected response from helper: {s}", .{response_buf[0..n]});
-        return error.InvalidHelperResponse;
-    }
-
-    if (std.mem.eql(u8, response_buf[0..n], "OK")) {
-        std.log.info("Helper reported success applying policy.", .{});
+    const response_buf = resp[0..n];
+    if (std.mem.eql(u8, response_buf, "OK")) {
+        std.log.info("Policy applied successfully", .{});
     } else {
-        std.log.err("Helper reported failure applying policy.", .{});
-        return error.HelperFailed;
+        std.log.err("Failed to apply policy", .{});
+        return error.PolicyApplicationFailed;
     }
 }
 
-fn runDryRun(policy_path: []const u8) !void {
-    std.log.info("Running dry-run: compiling policy and validating with nft -c", .{});
-    const nft_script = try compilePolicyToNft(policy_path);
-    defer alloc.free(nft_script);
-
-    std.debug.print("Compiled nftables script:\n---\n{s}\n---\n", .{nft_script});
+fn runDryRun(alloc: std.mem.Allocator, policy_path: []const u8) !void {
+    const script = try compilePolicyToNft(alloc, policy_path);
+    defer alloc.free(script);
 
     var child = std.process.Child.init(&[_][]const u8{ "nft", "-c", "-f", "-" }, alloc);
     child.stdin_behavior = .Pipe;
@@ -79,113 +66,103 @@ fn runDryRun(policy_path: []const u8) !void {
     try child.spawn();
 
     if (child.stdin) |stdin| {
-        _ = try stdin.writeAll(nft_script);
+        try stdin.writeAll(script);
         stdin.close();
+        child.stdin = null;
     }
 
     const term = try child.wait();
     switch (term) {
         .Exited => |code| {
             if (code == 0) {
-                std.log.info("Dry-run validation succeeded (nft -c).", .{});
+                std.debug.print("Dry-run validation passed.\n", .{});
             } else {
-                std.log.err("nft -c exited with code {d}", .{code});
-                return error.NftValidationFailed;
+                std.debug.print("Dry-run validation failed with exit code {d}\n", .{code});
             }
         },
         else => {
-            std.log.err("nft -c did not exit cleanly", .{});
-            return error.NftValidationFailed;
+            std.debug.print("nft process terminated unexpectedly\n", .{});
         },
     }
 }
 
-pub fn main() !void {
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+var should_exit = std.atomic.Value(bool).init(false);
 
-    var dry_run = false;
+fn handleSignal(sig: i32) callconv(.c) void {
+    _ = sig;
+    should_exit.store(true, .release);
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var args = try std.process.argsWithAllocator(alloc);
+    defer args.deinit();
+
+    _ = args.skip();
+
+    var dry_run_requested = false;
     var policy_path: []const u8 = "config/policy.yml";
-    var observer_enabled = true;
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
+    var disable_observer = false;
+
+    while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) {
-            dry_run = true;
+            dry_run_requested = true;
         } else if (std.mem.eql(u8, arg, "--policy")) {
-            if (i + 1 >= args.len) {
-                std.log.err("--policy requires a path argument", .{});
-                return error.InvalidArgument;
+            if (args.next()) |path| {
+                policy_path = path;
+            } else {
+                std.debug.print("Error: --policy requires a path argument\n", .{});
+                return error.MissingPolicyPath;
             }
-            policy_path = args[i + 1];
-            i += 1;
         } else if (std.mem.eql(u8, arg, "--no-observer")) {
-            observer_enabled = false;
+            disable_observer = true;
         } else {
-            std.log.err("Unknown argument: {s}", .{arg});
-            return error.InvalidArgument;
+            alloc.free(arg);
         }
     }
 
-    if (dry_run) {
-        try runDryRun(policy_path);
+    if (dry_run_requested) {
+        try runDryRun(alloc, policy_path);
         return;
     }
 
-    std.log.info("Vigil Agent starting...", .{});
-
-    applyLatestPolicy(policy_path) catch |err| {
-        std.log.err("Could not apply initial policy: {s}", .{@errorName(err)});
-        return err;
+    const sig_action = std.posix.Sigaction{
+        .handler = .{ .handler = handleSignal },
+        .mask = std.mem.zeroes(std.posix.sigset_t),
+        .flags = 0,
     };
+    std.posix.sigaction(std.posix.SIG.TERM, &sig_action, null);
+    std.posix.sigaction(std.posix.SIG.INT, &sig_action, null);
 
     var ds = try datastore.Datastore.init(alloc);
     defer ds.deinit();
 
-    // Start observer thread for netfilter conntrack monitoring (Linux only)
-    const observer_thread = if (observer_enabled) observer.start(&ds) catch |err| {
-        std.log.warn("Observer failed to start: {s}", .{@errorName(err)});
-        return err;
-    } else blk: {
-        std.log.info("Observer disabled by --no-observer flag", .{});
-        break :blk null;
-    };
-
-    std.log.info("Agent is running. Press Ctrl-C to stop.", .{});
-
-    // Atomic flag for signal-safe shutdown coordination
-    var stop_flag: u8 = 0;
-    global_stop_flag = &stop_flag;
-
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = @ptrCast(&sigHandlerWrapper) },
-        .mask = std.mem.zeroes(std.posix.sigset_t),
-        .flags = 0,
-    };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
-    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
-
-    // Main event loop - sleep until signal received
-    while (@atomicLoad(u8, &stop_flag, .acquire) == 0) {
-        std.Thread.sleep(1 * std.time.ns_per_s);
+    var observer_thread: ?std.Thread = null;
+    if (!disable_observer) {
+        if (observer.start(&ds)) |thread| {
+            observer_thread = thread;
+        } else |err| {
+            std.log.warn("Failed to start observer: {}", .{err});
+        }
     }
 
-    std.log.info("Shutdown signal received. Cleaning up...", .{});
+    std.log.info("Applying policy from {s}...", .{policy_path});
+    applyLatestPolicy(alloc, policy_path) catch |err| {
+        std.log.err("Failed to apply policy: {}", .{err});
+    };
 
-    // Observer thread will terminate when process exits (daemon thread)
-    // For production, implement graceful observer shutdown via context.should_stop
+    std.log.info("Vigil agent running. Press Ctrl+C to exit.", .{});
+    while (!should_exit.load(.acquire)) {
+        std.Thread.sleep(std.time.ns_per_s);
+    }
+
+    std.log.info("Shutting down...", .{});
     if (observer_thread) |thread| {
-        thread.detach();
+        thread.join();
     }
-}
 
-// Global pointer for signal handler to access stop flag (signal-safe pattern)
-var global_stop_flag: ?*u8 = null;
-
-// Signal handler wrapper - must be async-signal-safe
-fn sigHandlerWrapper(sig: c_int) callconv(.c) void {
-    _ = sig;
-    if (global_stop_flag) |flag| {
-        @atomicStore(u8, flag, 1, .release);
-    }
+    std.log.info("Vigil agent stopped.", .{});
 }

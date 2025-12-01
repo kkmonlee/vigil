@@ -71,8 +71,6 @@ pub const Datastore = struct {
     }
 
     pub fn recordFlow(self: *Datastore, flow: FlowRecord) !void {
-        // INSERT OR IGNORE provides deduplication via PRIMARY KEY constraint
-        // Multiple connections within same minute to same 5-tuple create single record
         const insert_sql =
             \\INSERT OR IGNORE INTO flows 
             \\(ts_minute, family, proto, src_addr, dst_addr, dst_port)
@@ -91,8 +89,6 @@ pub const Datastore = struct {
         _ = c.sqlite3_bind_int(stmt, 2, flow.family);
         _ = c.sqlite3_bind_int(stmt, 3, flow.proto);
 
-        // Format IP addresses as text for human-readable audit logs
-        // std.net.Address format produces "x.x.x.x:port" or "[ipv6]:port" notation
         var src_buf: [128]u8 = undefined;
         var dst_buf: [128]u8 = undefined;
         const src_str = try std.fmt.bufPrint(&src_buf, "{}", .{flow.src_addr});

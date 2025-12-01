@@ -15,7 +15,6 @@ pub fn compile(p: policy.Policy, alloc: std.mem.Allocator) ![]const u8 {
         return error.InvalidPolicy;
     }
 
-    // IPv6 validation: if enabled, must have both sourceSets and rules defined
     if (p.ipv6) |ipv6_policy| {
         if (ipv6_policy.enabled and (ipv6_policy.sourceSets == null or ipv6_policy.rules == null)) {
             return error.InvalidPolicy;

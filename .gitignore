@@ -5,3 +5,7 @@ zig-cache/
 *.nft
 .zig-cache/
 .vscode/
+build/
+docs/
+libs/
+main
