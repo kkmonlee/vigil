@@ -173,7 +173,7 @@ pub const HealthApi = struct {
         const uptime: u64 = @intCast(now - self.start_time);
 
         var response: [1024]u8 = undefined;
-        const len = try std.fmt.bufPrint(&response, 
+        const len = try std.fmt.bufPrint(&response,
             \\STATUS: OK
             \\VERSION: 0.1.0
             \\UPTIME_SECONDS: {d}
@@ -203,7 +203,7 @@ pub const HealthApi = struct {
         };
 
         var response: [512]u8 = undefined;
-        const len = try std.fmt.bufPrint(&response, 
+        const len = try std.fmt.bufPrint(&response,
             \\TOTAL_FLOWS: {d}
             \\UNIQUE_SOURCES: {d}
             \\UNIQUE_DESTINATIONS: {d}
