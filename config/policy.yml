@@ -2,6 +2,8 @@ sourceSets:
   lan: ["192.168.10.0/24"]
   vlan20: ["192.168.20.0/24"]
   monitoring: ["192.168.10.120/32"]
+  untrusted: ["10.0.0.0/8"]
+  management: ["192.168.1.0/24"]
 
 services:
   jellyfin:
@@ -19,20 +21,48 @@ services:
       - {port: 139, proto: tcp}
       - {port: 137, proto: udp}
       - {port: 138, proto: udp}
+  ssh:
+    listeners:
+      - {port: 22, proto: tcp}
+  http:
+    listeners:
+      - {port: 80, proto: tcp}
+      - {port: 443, proto: tcp}
+  dns:
+    listeners:
+      - {port: 53, proto: tcp}
+      - {port: 53, proto: udp}
+  highports:
+    listeners:
+      - {port: 8000-8100, proto: tcp}
 
 rules:
+  - deny: { sources: ["untrusted"], log: true }
+  - allow: { sources: ["management"], service: "ssh", rate: "10/minute" }
   - allow: { sources: ["lan", "vlan20"], service: "jellyfin" }
   - allow: { sources: ["lan"], service: "radarr" }
   - allow: { sources: ["lan"], service: "sonarr" }
   - allow: { sources: ["lan"], service: "samba" }
+  - allow: { sources: ["lan"], service: "dns" }
+  - allow: { sources: ["lan", "vlan20"], service: "http" }
+  - allow: { sources: ["lan"], service: "highports" }
 
 defaults:
   inbound: deny
   outbound: allow
 
+logging:
+  enabled: true
+  prefix: "VIGIL_DENY"
+  rate_limit: 5
+  burst: 10
+
 ipv6:
   enabled: true
   sourceSets:
     lan_v6: ["fd00:192:168:10::/64"]
+    management_v6: ["fd00:192:168:1::/64"]
   rules:
+    - allow: { sources: ["management_v6"], service: "ssh" }
     - allow: { sources: ["lan_v6"], service: "jellyfin" }
+    - allow: { sources: ["lan_v6"], service: "http" }
