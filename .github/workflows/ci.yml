@@ -1,0 +1,16 @@
+name: Linux regression tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run unit tests with Zig 0.15.2
+        run: docker build -f tests/Dockerfile -t vigil-tests .
+      - name: Test nftables transactions and helper access in an isolated network
+        run: docker run --rm --network none --cap-add NET_ADMIN vigil-tests

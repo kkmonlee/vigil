@@ -6,9 +6,9 @@ const datastore = @import("datastore.zig");
 const observer = @import("observer.zig");
 const watcher = @import("watcher.zig");
 const health = @import("health.zig");
+const helper_client = @import("helper_client.zig");
 
 const VERSION = "0.2.0";
-const SOCKET_PATH = "/tmp/vigil.sock";
 
 const Config = struct {
     policy_path: []const u8 = "config/policy.yml",
@@ -87,17 +87,7 @@ fn printHelp() void {
 
 fn loadAndValidatePolicy(alloc: std.mem.Allocator, policy_path: []const u8) !policy.Policy {
     var pol = try policy.Policy.loadFromFile(alloc, policy_path);
-    errdefer {
-        pol.sourceSets.deinit();
-        pol.services.deinit();
-        alloc.free(pol.rules);
-        alloc.free(pol.defaults.inbound);
-        alloc.free(pol.defaults.outbound);
-        if (pol.ipv6) |*ipv6| {
-            if (ipv6.sourceSets) |*sets| sets.deinit();
-            if (ipv6.rules) |rules| alloc.free(rules);
-        }
-    }
+    errdefer pol.deinit(alloc);
 
     try pol.validate();
     return pol;
@@ -110,33 +100,12 @@ fn compilePolicyToNft(alloc: std.mem.Allocator, policy_path: []const u8) ![]cons
     return try compiler.compile(pol, alloc);
 }
 
-fn applyLatestPolicy(alloc: std.mem.Allocator, policy_path: []const u8) !void {
+fn applyLatestPolicy(alloc: std.mem.Allocator, policy_path: []const u8, socket_path: []const u8) !void {
     const script = try compilePolicyToNft(alloc, policy_path);
     defer alloc.free(script);
 
-    const stream = std.net.connectUnixSocket(SOCKET_PATH) catch |err| {
-        std.log.err("Failed to connect to helper at {s}: {}", .{ SOCKET_PATH, err });
-        return err;
-    };
-    defer stream.close();
-
-    const len: u32 = @intCast(script.len);
-    try stream.writeAll(std.mem.asBytes(&len));
-    try stream.writeAll(script);
-
-    var resp: [8]u8 = undefined;
-    const n = try stream.read(&resp);
-    if (n == 0) {
-        return error.HelperNoResponse;
-    }
-
-    const response_buf = resp[0..n];
-    if (std.mem.eql(u8, response_buf, "OK")) {
-        std.log.info("Policy applied successfully", .{});
-    } else {
-        std.log.err("Failed to apply policy", .{});
-        return error.PolicyApplicationFailed;
-    }
+    try helper_client.apply(socket_path, script);
+    std.log.info("Policy applied successfully", .{});
 }
 
 fn runDryRun(alloc: std.mem.Allocator, policy_path: []const u8) !void {
@@ -220,6 +189,12 @@ pub fn main() !void {
     std.posix.sigaction(std.posix.SIG.TERM, &sig_action, null);
     std.posix.sigaction(std.posix.SIG.INT, &sig_action, null);
 
+    const socket_path = try helper_client.socketPath(alloc);
+    defer alloc.free(socket_path);
+
+    std.log.info("Applying policy from {s}...", .{config.policy_path});
+    try applyLatestPolicy(alloc, config.policy_path, socket_path);
+
     var ds = try datastore.Datastore.init(alloc);
     defer ds.deinit();
 
@@ -242,15 +217,10 @@ pub fn main() !void {
 
     var policy_watcher: ?watcher.PolicyWatcher = null;
     if (config.enable_watcher and builtin.os.tag == .linux) {
-        policy_watcher = try watcher.PolicyWatcher.init(alloc, config.policy_path, SOCKET_PATH);
+        policy_watcher = try watcher.PolicyWatcher.init(alloc, config.policy_path, socket_path);
         try policy_watcher.?.start();
     }
     defer if (policy_watcher) |*w| w.deinit();
-
-    std.log.info("Applying policy from {s}...", .{config.policy_path});
-    applyLatestPolicy(alloc, config.policy_path) catch |err| {
-        std.log.err("Failed to apply policy: {}", .{err});
-    };
 
     if (health_api) |*api| api.setPolicyLoaded(true);
 

@@ -1,0 +1,10 @@
+.git
+.zig-cache
+zig-cache
+zig-out
+build
+libs
+docs
+main
+**/__pycache__
+*.log

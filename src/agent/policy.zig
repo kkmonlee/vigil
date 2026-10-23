@@ -1,6 +1,3 @@
-// Policy parser: Custom YAML subset parser for firewall rule definitions
-// Supports IPv4/IPv6 source sets, service definitions with listeners, allow rules, and default policies
-// Avoids external dependencies for security-critical configuration parsing
 const std = @import("std");
 
 pub const PortRange = struct {
@@ -208,7 +205,7 @@ pub const Policy = struct {
                 continue;
             } else if (std.mem.startsWith(u8, trimmed, "ipv6:")) {
                 current_section = .ipv6;
-                ipv6_enabled = true; // Enable ipv6 when we encounter the section
+                ipv6_enabled = true;
                 continue;
             }
 

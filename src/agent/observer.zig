@@ -1,7 +1,3 @@
-// Conntrack observer: Linux netfilter connection tracking monitor via libmnl
-// Subscribes to NETLINK_NETFILTER for new connection events (CT_NEW)
-// Extracts flow 5-tuple and records to datastore for audit trail
-// Platform-conditional: Linux only (uses kernel netlink interface)
 const std = @import("std");
 const datastore = @import("datastore.zig");
 const builtin = @import("builtin");
@@ -48,14 +44,15 @@ fn listenLoop(ctx: *ThreadContext) void {
         std.log.err("Failed to open netlink socket", .{});
         return;
     }
-    defer c.mnl_socket_close(nl);
+    defer _ = c.mnl_socket_close(nl);
 
     if (c.mnl_socket_bind(nl, 0, c.MNL_SOCKET_AUTOPID) < 0) {
         std.log.err("Failed to bind netlink socket", .{});
         return;
     }
 
-    if (c.mnl_socket_setsockopt(nl, c.NETLINK_ADD_MEMBERSHIP, &c.NF_NETLINK_CONNTRACK_NEW, @sizeOf(@TypeOf(c.NF_NETLINK_CONNTRACK_NEW))) < 0) {
+    var group: c_int = c.NFNLGRP_CONNTRACK_NEW;
+    if (c.mnl_socket_setsockopt(nl, c.NETLINK_ADD_MEMBERSHIP, &group, @sizeOf(c_int)) < 0) {
         std.log.err("Failed to join conntrack multicast group", .{});
         return;
     }
@@ -88,13 +85,13 @@ fn dataCallback(nlh: ?*const c.nlmsghdr, data: ?*anyopaque) callconv(.c) c_int {
     var tb: [c.CTA_MAX + 1]?*c.nlattr = undefined;
     @memset(&tb, null);
 
-    _ = c.mnl_attr_parse(nlh, @sizeOf(c.nfgenmsg), attrCallback, &tb);
+    _ = c.mnl_attr_parse(nlh, @sizeOf(c.nfgenmsg), attrCallback, @ptrCast(&tb));
 
     if (tb[c.CTA_TUPLE_ORIG] == null) return c.MNL_CB_OK;
 
     var tb_orig: [c.CTA_TUPLE_MAX + 1]?*c.nlattr = undefined;
     @memset(&tb_orig, null);
-    _ = c.mnl_attr_parse_nested(tb[c.CTA_TUPLE_ORIG], tupleCallback, &tb_orig);
+    _ = c.mnl_attr_parse_nested(tb[c.CTA_TUPLE_ORIG], tupleCallback, @ptrCast(&tb_orig));
 
     if (tb_orig[c.CTA_TUPLE_IP] == null or tb_orig[c.CTA_TUPLE_PROTO] == null) {
         return c.MNL_CB_OK;
@@ -102,11 +99,11 @@ fn dataCallback(nlh: ?*const c.nlmsghdr, data: ?*anyopaque) callconv(.c) c_int {
 
     var tb_ip: [c.CTA_IP_MAX + 1]?*c.nlattr = undefined;
     @memset(&tb_ip, null);
-    _ = c.mnl_attr_parse_nested(tb_orig[c.CTA_TUPLE_IP], ipCallback, &tb_ip);
+    _ = c.mnl_attr_parse_nested(tb_orig[c.CTA_TUPLE_IP], ipCallback, @ptrCast(&tb_ip));
 
     var tb_proto: [c.CTA_PROTO_MAX + 1]?*c.nlattr = undefined;
     @memset(&tb_proto, null);
-    _ = c.mnl_attr_parse_nested(tb_orig[c.CTA_TUPLE_PROTO], protoCallback, &tb_proto);
+    _ = c.mnl_attr_parse_nested(tb_orig[c.CTA_TUPLE_PROTO], protoCallback, @ptrCast(&tb_proto));
 
     const family: u4 = @intCast(nfg.*.nfgen_family);
     const proto: u8 = if (tb_proto[c.CTA_PROTO_NUM]) |attr| c.mnl_attr_get_u8(attr) else return c.MNL_CB_OK;

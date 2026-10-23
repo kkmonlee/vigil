@@ -19,7 +19,8 @@ pub fn compile(p: policy.Policy, alloc: std.mem.Allocator) ![]const u8 {
         }
     }
 
-    try buffer.appendSlice(alloc, "flush ruleset\n\n");
+    // Replace only our table in one transaction.
+    try buffer.appendSlice(alloc, "add table inet vigilfw\ndelete table inet vigilfw\n\n");
     try buffer.appendSlice(alloc, "table inet vigilfw {\n");
     try buffer.appendSlice(alloc, "\n");
 
@@ -98,23 +99,6 @@ pub fn compile(p: policy.Policy, alloc: std.mem.Allocator) ![]const u8 {
                 udp_ports.items,
             });
         }
-    }
-
-    var rate_limit_counter: u32 = 0;
-    for (p.rules) |rule| {
-        if (rule.allow) |allow| {
-            if (allow.rate_limit != null) {
-                try buffer.writer(alloc).print(
-                    \\
-                    \\    meter rate_limit_{d} {{ type ipv4_addr; size 65535; }}
-                , .{rate_limit_counter});
-                rate_limit_counter += 1;
-            }
-        }
-    }
-
-    if (rate_limit_counter > 0) {
-        try buffer.appendSlice(alloc, "\n");
     }
 
     const policy_action = if (std.mem.eql(u8, p.defaults.inbound, "deny")) "drop" else "accept";

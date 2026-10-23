@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const policy = @import("policy.zig");
 const compiler = @import("compiler.zig");
+const helper_client = @import("helper_client.zig");
 
 const c = if (builtin.os.tag == .linux) @cImport({
     @cInclude("sys/inotify.h");
@@ -97,7 +98,11 @@ fn watchLoop(ctx: *WatcherContext) void {
     defer _ = c.close(ifd);
 
     const dir_path = std.fs.path.dirname(ctx.policy_path) orelse ".";
-    const dir_path_z = std.mem.span(@as([*:0]const u8, @ptrCast(dir_path.ptr)));
+    const dir_path_z = ctx.allocator.dupeZ(u8, dir_path) catch {
+        std.log.err("Failed to allocate policy directory path", .{});
+        return;
+    };
+    defer ctx.allocator.free(dir_path_z);
 
     const wd = c.inotify_add_watch(ifd, dir_path_z.ptr, c.IN_MODIFY | c.IN_CLOSE_WRITE | c.IN_MOVED_TO);
     if (wd < 0) {
@@ -108,7 +113,7 @@ fn watchLoop(ctx: *WatcherContext) void {
 
     std.log.info("Policy watcher started for {s}", .{ctx.policy_path});
 
-    var buf: [INOTIFY_BUF_LEN]u8 = undefined;
+    var buf: [INOTIFY_BUF_LEN]u8 align(@alignOf(c.inotify_event)) = undefined;
     var pfd = [_]c.pollfd{.{ .fd = ifd, .events = c.POLLIN, .revents = 0 }};
 
     const filename = std.fs.path.basename(ctx.policy_path);
@@ -137,7 +142,7 @@ fn watchLoop(ctx: *WatcherContext) void {
 
             if (event.len > 0) {
                 const name_ptr = @as([*]const u8, @ptrCast(&buf[i + INOTIFY_EVENT_SIZE]));
-                const name = std.mem.sliceTo(name_ptr, 0);
+                const name = std.mem.sliceTo(name_ptr[0..event.len], 0);
 
                 if (std.mem.eql(u8, name, filename)) {
                     const now = std.time.timestamp();
@@ -167,44 +172,13 @@ fn watchLoop(ctx: *WatcherContext) void {
 
 fn reloadPolicy(ctx: *WatcherContext) !void {
     var pol = try policy.Policy.loadFromFile(ctx.allocator, ctx.policy_path);
-    defer {
-        pol.sourceSets.deinit();
-        pol.services.deinit();
-        ctx.allocator.free(pol.rules);
-        ctx.allocator.free(pol.defaults.inbound);
-        ctx.allocator.free(pol.defaults.outbound);
-        if (pol.ipv6) |*ipv6| {
-            if (ipv6.sourceSets) |*sets| sets.deinit();
-            if (ipv6.rules) |rules| ctx.allocator.free(rules);
-        }
-    }
+    defer pol.deinit(ctx.allocator);
 
     try pol.validate();
 
     const script = try compiler.compile(pol, ctx.allocator);
     defer ctx.allocator.free(script);
 
-    const stream = std.net.connectUnixSocket(ctx.socket_path) catch |err| {
-        std.log.err("Failed to connect to helper: {}", .{err});
-        return err;
-    };
-    defer stream.close();
-
-    const len: u32 = @intCast(script.len);
-    try stream.writeAll(std.mem.asBytes(&len));
-    try stream.writeAll(script);
-
-    var resp: [8]u8 = undefined;
-    const n = try stream.read(&resp);
-    if (n == 0) {
-        return error.HelperNoResponse;
-    }
-
-    const response_buf = resp[0..n];
-    if (std.mem.eql(u8, response_buf, "OK")) {
-        std.log.info("Policy reloaded and applied successfully", .{});
-    } else {
-        std.log.err("Failed to apply reloaded policy", .{});
-        return error.PolicyApplicationFailed;
-    }
+    try helper_client.apply(ctx.socket_path, script);
+    std.log.info("Policy reloaded and applied successfully", .{});
 }

@@ -2,6 +2,7 @@
     .fingerprint = 0x4b3d7ac344056ba4,
     .name = .vigil,
     .version = "0.1.0",
-    .paths = .{ "build.zig", "src/agent/main.zig", "src/agent/compiler.zig", "src/agent/datastore.zig", "src/agent/observer.zig", "src/agent/policy.zig", "src/common/protocol.zig", "src/helper/helper.c" },
+    .minimum_zig_version = "0.15.2",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "config", "readme.md" },
     .dependencies = .{},
 }

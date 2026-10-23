@@ -3,6 +3,8 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
+extern fn vigil_sqlite_bind_text(stmt: ?*c.sqlite3_stmt, index: c_int, text: [*c]const u8, length: c_int) c_int;
+
 const DB_PATH = "/var/lib/vigil/flows.db";
 const DB_DIR = "/var/lib/vigil";
 
@@ -139,11 +141,11 @@ pub const Datastore = struct {
 
         var src_buf: [128]u8 = undefined;
         var dst_buf: [128]u8 = undefined;
-        const src_str = try std.fmt.bufPrint(&src_buf, "{}", .{flow.src_addr});
-        const dst_str = try std.fmt.bufPrint(&dst_buf, "{}", .{flow.dst_addr});
+        const src_str = try std.fmt.bufPrint(&src_buf, "{f}", .{flow.src_addr});
+        const dst_str = try std.fmt.bufPrint(&dst_buf, "{f}", .{flow.dst_addr});
 
-        _ = c.sqlite3_bind_text(stmt, 4, src_str.ptr, @intCast(src_str.len), c.SQLITE_TRANSIENT);
-        _ = c.sqlite3_bind_text(stmt, 5, dst_str.ptr, @intCast(dst_str.len), c.SQLITE_TRANSIENT);
+        _ = vigil_sqlite_bind_text(stmt, 4, src_str.ptr, @intCast(src_str.len));
+        _ = vigil_sqlite_bind_text(stmt, 5, dst_str.ptr, @intCast(dst_str.len));
         _ = c.sqlite3_bind_int(stmt, 6, flow.dst_port);
 
         const rc = c.sqlite3_step(stmt);
@@ -367,7 +369,7 @@ pub const Datastore = struct {
         }
         defer _ = c.sqlite3_finalize(stmt);
 
-        _ = c.sqlite3_bind_text(stmt, 1, source_addr.ptr, @intCast(source_addr.len), c.SQLITE_TRANSIENT);
+        _ = vigil_sqlite_bind_text(stmt, 1, source_addr.ptr, @intCast(source_addr.len));
         _ = c.sqlite3_bind_int(stmt, 2, @intCast(limit));
 
         var results: std.ArrayList(FlowRecord) = .{ .items = &.{}, .capacity = 0 };
